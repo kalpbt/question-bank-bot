@@ -1,0 +1,25 @@
+# PDF processing
+pymupdf==1.23.7
+
+# Data manipulation
+pandas==2.2.2
+
+# Streamlit for web UI
+streamlit==1.35.0
+
+# PyTorch + CUDA 12.1 (optimized for RTX 4090)
+torch==2.3.0+cu121
+torchvision==0.18.0+cu121
+torchaudio==2.3.0+cu121
+--extra-index-url https://download.pytorch.org/whl/cu121
+
+
+pytesseract
+pdf2image
+pillow
+
+openai
+
+fpdf
+
+python-dotenv
