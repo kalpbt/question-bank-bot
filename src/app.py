@@ -6,6 +6,8 @@ import streamlit as st
 import os
 import json
 import logging
+import time
+import tiktoken  # pip install tiktoken
 
 from src.chapter_generation import generate_chapterwise_json
 from src.openai_utils import (
@@ -21,14 +23,17 @@ os.makedirs("logs", exist_ok=True)
 os.makedirs("uploaded_data", exist_ok=True)
 
 # Configure logging
-logging.basicConfig(
-    filename=os.path.join("logs", "app.log"),
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s"
-)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setLevel(logging.INFO)
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s    ')
+console_handler.setFormatter(formatter)
+logger.addHandler(console_handler)
 
 st.title("Custom Question Bank Generator")
-logging.info("App started.")
+logger.info("App started.")
 
 MAX_QUESTION_BANKS = 20
 
@@ -50,8 +55,15 @@ pdf_choice = "book.pdf"
 st.markdown(f'**PDF:** "{pdf_choice}"')
 logging.info(f"PDF set to: {pdf_choice}")
 
-# Only show the rest of the UI if a valid number is entered
-if num_question_banks:
+# Use session_state to persist confirmation
+if "confirmed" not in st.session_state:
+    st.session_state.confirmed = False
+
+if not st.session_state.confirmed:
+    if st.button("Confirm number of question banks"):
+        st.session_state.confirmed = True
+
+if st.session_state.confirmed:
     # Step 1: PDF selection/upload
     default_pdf = os.path.join("data", "book.pdf")
     pdf_files = [f for f in os.listdir("data") if f.endswith(".pdf")]
@@ -61,9 +73,6 @@ if num_question_banks:
     is_default = (pdf_path == default_pdf)
     logging.info(f"Using default PDF: {pdf_path}, is_default={is_default}")
     chapters_folder = "chapters"
-
-    # Step 2: Select the number of Question Banks to generate
-    num_question_banks = st.number_input("Number of Question Banks to generate:", min_value=1, max_value=5, value=1)
 
     # Only show the extraction/generation button if a new PDF is uploaded
     if not is_default:
@@ -94,54 +103,198 @@ if num_question_banks:
                 data = json.load(f)
                 chapter_names.append(data.get("chapter_name", file))
 
-        selected_chapters = st.multiselect(
-            "Select chapter(s) for question generation:",
-            options=chapter_files,
-            format_func=lambda x: chapter_names[chapter_files.index(x)]
-        )
-        logging.info(f"Chapters selected: {selected_chapters}")
+        # st.markdown("### Select number of questions for each chapter:")
+        # chapter_question_counts = {}
+        # for idx, file in enumerate(chapter_files):
+        #     # Try to get the chapter name from the JSON, fallback to file name
+        #     with open(os.path.join(chapters_folder, file), "r", encoding="utf-8") as f:
+        #         data = json.load(f)
+        #         chapter_display = data.get("chapter_name", file)
+        #     label = f'select number of questions from chapter: "{chapter_display}"'
+        #     chapter_question_counts[file] = st.number_input(
+        #         label,
+        #         min_value=0,
+        #         max_value=20,
+        #         value=0,
+        #         step=1,
+        #         key=f"num_questions_{file}"
+        #     )
 
-        difficulty = st.selectbox("Select difficulty:", ["Easy", "Medium", "Hard"])
+        # # Only include chapters with at least 1 question selected
+        # selected_chapters = [file for file, count in chapter_question_counts.items() if count > 0]
+        # logging.info(f"Chapters selected: {selected_chapters}")
+
+        # Difficulty per question bank
+        st.markdown("### Select difficulty per question bank:")
+        difficulties = []
+        num_per_row = 5
+        for row_start in range(0, num_question_banks, num_per_row):
+            cols = st.columns(num_per_row)
+            for col_idx in range(num_per_row):
+                qb_idx = row_start + col_idx
+                if qb_idx < num_question_banks:
+                    with cols[col_idx]:
+                        diff = st.selectbox(
+                            f"{qb_idx+1}",
+                            ["Easy", "Medium", "Hard"],
+                            key=f"difficulty_qb_{qb_idx}"
+                        )
+                        difficulties.append(diff)
+                else:
+                    with cols[col_idx]:
+                        st.empty()
+
         domain = st.multiselect(
             "Select cognitive domain(s):",
             ["Knowledge", "Comprehension", "Application", "Analysis", "Evaluation"]    
         )
-        num_mcq = st.number_input("Number of MCQs:", min_value=0, max_value=20, value=5)
-        num_tf = st.number_input("Number of True/False questions:", min_value=0, max_value=20, value=3)
-        num_short = st.number_input("Number of Short Answer questions:", min_value=0, max_value=20, value=2)
 
-        if st.button("Generate Question Bank"):
+        st.markdown("### Select number of each question type for each chapter:")
+        chapter_question_counts = {}
+        for idx, file in enumerate(chapter_files):
+            with open(os.path.join(chapters_folder, file), "r", encoding="utf-8") as f:
+                data = json.load(f)
+                chapter_display = data.get("chapter_name", file)
+            st.markdown(f'**{chapter_display}**')
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                mcq = st.number_input(
+                    f"MCQ's",
+                    min_value=0,
+                    max_value=20,
+                    value=0,
+                    step=1,
+                    key=f"mcq_{file}"
+                )
+            with col2:
+                tf = st.number_input(
+                    f"True/False's",
+                    min_value=0,
+                    max_value=20,
+                    value=0,
+                    step=1,
+                    key=f"tf_{file}"
+                )
+            with col3:
+                short = st.number_input(
+                    f"Short Answers",
+                    min_value=0,
+                    max_value=20,
+                    value=0,
+                    step=1,
+                    key=f"short_{file}"
+                )
+            chapter_question_counts[file] = {
+                "mcq": mcq,
+                "tf": tf,
+                "short": short
+            }
+
+        # Only include chapters with at least 1 question selected
+        selected_chapters = [
+            file for file, counts in chapter_question_counts.items()
+            if counts["mcq"] > 0 or counts["tf"] > 0 or counts["short"] > 0
+        ]
+        logging.info(f"Chapters selected: {selected_chapters}")
+
+        def get_chunks_with_context(text, max_tokens=1000, overlap=200):
+            """Split text into overlapping chunks, including previous paragraph for context."""
+            words = text.split()
+            chunks = []
+            i = 0
+            prev_paragraph = ""
+            while i < len(words):
+                chunk_words = words[i:i+max_tokens]
+                chunk_text = " ".join(chunk_words)
+                # Add previous paragraph for context if not the first chunk
+                if prev_paragraph:
+                    chunk_text = prev_paragraph + "\n\n" + chunk_text
+                # Save last paragraph for next chunk's context
+                paragraphs = chunk_text.split("\n\n")
+                prev_paragraph = paragraphs[-1] if paragraphs else ""
+                chunks.append(chunk_text)
+                i += max_tokens - overlap
+            return chunks
+
+        def num_tokens_from_string(string: str, model_name: str = "gpt-4o"):
+            encoding = tiktoken.encoding_for_model(model_name)
+            return len(encoding.encode(string))
+
+        MAX_TOKENS_PER_CHAPTER = 25000  # adjust as needed 
+
+        if "qb_results" not in st.session_state:
+            st.session_state.qb_results = None
+
+        # Store chapters in session_state to avoid reloading for each QB
+        if "loaded_chapters" not in st.session_state or st.session_state.get("loaded_chapters_selected") != selected_chapters:
+            st.session_state.loaded_chapters = load_chapter_content(selected_chapters, chapter_dir=chapters_folder)
+            st.session_state.loaded_chapters_selected = selected_chapters.copy()
+
+        if st.button("Generate Question Bank(s)"):
             logging.info("Generate Question Bank button clicked.")
             if not selected_chapters:
-                st.warning("Please select at least one chapter.")
+                st.warning("Please select at least one chapter with at least one question.")
                 logging.warning("No chapters selected.")
-            elif num_mcq + num_tf + num_short == 0:
-                st.warning("Please select at least one question.")
-                logging.warning("No questions selected.")
             else:
-                with st.spinner("Generating questions..."):
-                    chapters = load_chapter_content(selected_chapters, chapter_dir=chapters_folder)
-                    logging.info(f"Loaded chapter content for: {selected_chapters}")
-                    combined_content = "\n\n".join([c["content"] for c in chapters])
-                    domain_str = ", ".join(domain) if isinstance(domain, list) else domain
-                    prompt = build_prompt(
-                        combined_content, num_mcq, num_tf, num_short, difficulty, domain_str
-                    )
-                    logging.info(f"Prompt built for OpenAI: {prompt[:100]}...")  # Log first 100 chars
-                    try:
-                        questions = call_openai(prompt)
-                        st.success("Question bank generated!")
-                        st.text_area("Generated Question Bank", questions, height=400)
-                        st.download_button(
-                            label="Download as .txt",
-                            data=questions,
-                            file_name="question_bank.txt",
-                            mime="text/plain"
+                chapters = st.session_state.loaded_chapters
+                logging.info(f"Loaded chapter content for: {selected_chapters}")
+                qb_results = []
+                qb_placeholders = []
+                for i in range(num_question_banks):
+                    qb_placeholder = st.empty()
+                    qb_placeholders.append(qb_placeholder)
+                    qb_results.append("")  # Initialize with empty string
+
+                for i in range(num_question_banks):
+                    qb_text = ""
+                    for chapter_idx, chapter in enumerate(chapters):
+                        file = chapter['file']
+                        chapter_counts = {file: chapter_question_counts[file]}
+                        chapter_tokens = num_tokens_from_string(chapter['content'])
+                        if chapter_tokens > MAX_TOKENS_PER_CHAPTER:
+                            st.warning(f"Chapter '{chapter['name']}' is too large ({chapter_tokens} tokens). Splitting into chunks.")
+                            continue  # or handle chunking as before
+                        chapter_prompt = build_prompt(
+                            [{"file": file, "name": chapter['name'], "content": chapter['content']}],
+                            chapter_counts,
+                            difficulties[i],
+                            domain
                         )
-                        logging.info("Question bank generated and displayed.")
-                    except Exception as e:
-                        st.error(f"Error: {e}")
-                        logging.error(f"Error during question generation: {e}")
+                        logging.info(f"Prompt built for OpenAI (QB {i+1}, Chapter: {chapter['name']}): {chapter_prompt[:100]}...")
+                        try:
+                            questions = call_openai(chapter_prompt)
+                            qb_text += f"--- {chapter['name']} ---\n{questions}\n\n"
+                            logging.info(f"Questions for chapter {chapter['name']} (QB {i+1}) generated.")
+                            # Update the placeholder with current questions
+                            qb_placeholders[i].markdown(f"### Question Bank {i+1}\n```\n{qb_text}\n```")
+                            time.sleep(60)  # Wait 60 seconds before next chapter to avoid rate limits
+                        except Exception as e:
+                            st.error(f"Error in QB {i+1}, chapter {chapter['name']}: {e}")
+                            logging.error(f"Error during question generation for QB {i+1}, chapter {chapter['name']}: {e}")
+                        if chapter_idx < len(chapters) - 1:
+                            logging.info(f"Waiting 60 seconds before next chapter.")
+                            time.sleep(60)
+                    qb_results[i] = qb_text
+                st.session_state.qb_results = qb_results
+                st.success("All question banks generated! Download buttons are now available below.")
+
+    # Show download buttons only if all QBs are generated
+    if st.session_state.qb_results:
+        for i, qb_text in enumerate(st.session_state.qb_results):
+            st.markdown(f"## Question Bank {i+1}")
+            st.text_area(
+                f"Generated Questions for Question Bank {i+1}",
+                qb_text,
+                height=400,
+                key=f"qb_{i}_text"
+            )
+            st.download_button(
+                label=f"Download Question Bank {i+1} as .txt",
+                data=qb_text,
+                file_name=f"question_bank_{i+1}.txt",
+                mime="text/plain",
+                key=f"qb_{i}_download"
+            )
     else:
         st.info("Please extract chapters from a PDF first (only needed for uploaded PDFs).")
         logging.info("No chapters found. Prompted user to extract chapters.")
